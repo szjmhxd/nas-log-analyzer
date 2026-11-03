@@ -1,0 +1,16 @@
+# 数据与运行产物
+logs.db
+logs.db-wal
+logs.db-shm
+clean/
+tool/.cache/
+tool/.tmp/
+__pycache__/
+*.pyc
+
+# 示例数据可用 sample/make_sample.py 重新生成
+# sample/*.csv  # 保留在库里，方便直接拖进去试
+
+# 系统
+.DS_Store
+Thumbs.db
