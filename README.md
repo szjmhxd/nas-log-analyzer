@@ -23,7 +23,7 @@
 
 开源地址：https://github.com/szjmhxd/nas-log-analyzer （代码已脱敏，只保留工具本体，不含任何业务数据）
 
-端口被占用时指定别的：
+默认端口 8777。被占用时会依次试 8778~8782、8081、8090，都不可用才交给系统分配，实际地址以控制台打印的那一行为准。也可以直接指定：
 
 ```bash
 set PORT=8888 && python tool/server.py          # Windows

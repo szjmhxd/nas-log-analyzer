@@ -606,17 +606,21 @@ def main():
         clear_overview_cache()   # 元数据变了，缓存作废
     warm_overview()              # 后台先把概览算好，前端打开即出图
     threading.Thread(target=lambda: lineage(conn()), daemon=True).start()
-    # 先试默认端口；被占用（或落在 Windows 保留端口段里）就让系统分配一个
-    try:
-        srv, port = Server(("127.0.0.1", PORT), Handler), PORT
-    except OSError:
+    # 先试默认端口；被占用（或落在 Windows 保留端口段里）就依次试几个相邻端口，
+    # 都不行再让系统分配，免得每次重启都换一个记不住的随机端口。
+    srv = None
+    for p in [PORT] + [PORT + i for i in range(1, 6)] + [8081, 8090, 0]:
         try:
-            srv = Server(("127.0.0.1", 0), Handler)
+            srv = Server(("127.0.0.1", p), Handler)
             port = srv.server_address[1]
-            print("[提示] %d 端口不可用，已改用 %d" % (PORT, port))
-        except OSError as e:
-            print("[ERROR] 无法监听本地端口：%s" % e)
-            return
+            if p not in (PORT, 0):
+                print("[提示] %d 端口被占用，改用 http://127.0.0.1:%d" % (PORT, port))
+            break
+        except OSError:
+            continue
+    if srv is None:
+        print("[ERROR] 找不到可用的本地端口")
+        return
     print("=" * 46)
     print("  NAS 日志分析台已启动")
     print("  浏览器打开:  http://127.0.0.1:%d" % port)
