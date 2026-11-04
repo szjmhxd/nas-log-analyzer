@@ -3,6 +3,11 @@
 把群晖（Synology）NAS 审计日志导出的 CSV 变成一个可检索、可统计的本地工具。
 纯 Python 标准库 + 浏览器，不联网、不装依赖、数据不出本机。
 
+> **适用范围：只处理群晖 NAS 的文件日志。** 具体是 DSM「日志中心」导出的 CSV ——
+> 文件传输日志（8 / 9 列）和「全部日志」（7 列），见下文「支持的导出格式」。
+> 其他品牌 NAS、群晖其它模块导出的日志（系统 / 套件 / 硬件等）、
+> 以及非 CSV 的导出格式都不在支持范围内。
+
 ![概览](https://raw.githubusercontent.com/szjmhxd/nas-log-analyzer/master/docs/overview.png)
 
 ## 为什么需要它
@@ -20,6 +25,10 @@
 需要 Python 3.8+（Windows 上确认 `python` 命令可用）。
 
 本项目已经部署在本机，直接双击根目录 **`start.bat`** 即可（等价于 `python tool/server.py`）。
+
+启动脚本会先跑一遍环境自检（`tool/preflight.py`）：Python 版本、标准库是否齐全、SQLite 版本，任何一项不通过就停下来告诉你缺什么，不会带着残缺的环境硬启动。
+
+工具本体**只用 Python 标准库，没有 pip 依赖**，不需要 `pip install`。万一以后引入了第三方包，把包名写进根目录的 `requirements.txt`，自检脚本会自动执行 `pip install -r requirements.txt`，装失败会给出退出码和镜像源提示。
 
 开源地址：https://github.com/szjmhxd/nas-log-analyzer （代码已脱敏，只保留工具本体，不含任何业务数据）
 
@@ -117,6 +126,7 @@ PORT=8888 python tool/server.py                 # macOS / Linux
   tool/
     server.py        本地 HTTP 服务
     parser.py        解析、清洗、入库
+    preflight.py     启动前环境自检
     static/index.html 单文件界面
   start.bat          Windows 启动脚本
 ```

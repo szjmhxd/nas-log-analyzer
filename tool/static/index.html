@@ -45,7 +45,9 @@ button,input,select,textarea{font-family:inherit;font-size:inherit;color:inherit
 .nav a:hover{background:#F5F6F8;color:var(--ink)}
 .nav a.on{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
 .nav svg{width:15px;height:15px;stroke-width:1.7;flex:0 0 15px}
-.side .foot{margin-top:auto;padding:10px 10px 4px;font-size:10.5px;color:var(--ink3);line-height:1.6}
+.side .scope{margin-top:auto;margin-bottom:8px;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:var(--line2);font-size:10.5px;line-height:1.6;color:var(--ink3)}
+.side .scope b{display:block;color:var(--ink2);font-weight:600;margin-bottom:1px}
+.side .foot{padding:10px 10px 4px;font-size:10.5px;color:var(--ink3);line-height:1.6}
 .side .foot b{color:var(--ink2);font-weight:600}
 
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -303,6 +305,9 @@ svg.line{display:block;width:100%}
       <a data-v="sql"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><ellipse cx="12" cy="5.5" rx="8" ry="3"/><path d="M4 5.5v13c0 1.7 3.6 3 8 3s8-1.3 8-3v-13"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>SQL 查询</a>
       <a data-v="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M13 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V9z"/><path d="M13 3v6h6"/></svg>数据文件</a>
     </nav>
+    <div class="scope" title="只解析群晖 DSM「日志中心」导出的 7 / 8 / 9 列 CSV；其他品牌 NAS、其他产品的日志格式不在支持范围内">
+      <b>适用范围</b>仅群晖 NAS 导出的文件日志
+    </div>
     <div class="foot" id="foot">连接中…</div>
   </aside>
 
@@ -903,8 +908,8 @@ async function viewFiles(){
   <div class="card" style="padding:16px;margin-bottom:12px">
     <div class="drop" id="drop">
       <b>把 CSV 拖到这里，或点击选择</b>
-      <span>支持 7 / 8 / 9 列三种导出格式 · 同名文件会覆盖重导<br>
-      导入后自动去重，重复记录不会重复计数</span>
+      <span>只认群晖 DSM「日志中心」导出的 CSV，支持 7 / 8 / 9 列三种格式<br>
+      同名文件会覆盖重导，导入后自动去重，重复记录不会重复计数</span>
       <input type="file" id="fi" accept=".csv" multiple class="hide">
     </div>
     <div id="prog" class="hide" style="padding:14px 4px 2px">

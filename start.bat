@@ -7,6 +7,18 @@ cd /d "%~dp0"
 where python >nul 2>&1
 if errorlevel 1 goto nopython
 
+echo Checking environment ...
+echo.
+python tool\preflight.py
+if errorlevel 1 (
+  echo.
+  echo [ERROR] Environment check failed. Fix the items above and run again.
+  echo.
+  pause
+  goto :eof
+)
+echo.
+
 echo Starting NAS Log Analyzer ...
 echo.
 python tool\server.py
