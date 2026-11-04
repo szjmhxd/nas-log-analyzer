@@ -189,6 +189,7 @@ def import_csv(db_path, src_path, clean_dir=None, progress=None, display_name=No
     """导入单个 CSV，返回统计 dict。同名 src 会先清空旧数据。"""
     fn = display_name or os.path.basename(src_path)
     con = connect(db_path)
+    ensure_search(con)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=OFF")
     con.execute("PRAGMA cache_size=-200000")
@@ -207,6 +208,7 @@ def import_csv(db_path, src_path, clean_dir=None, progress=None, display_name=No
         raise ValueError("表头不认识：%s" % ",".join(header))
 
     con.execute("DELETE FROM logs WHERE src = ?", (fn,))
+    con.execute("DELETE FROM sidx WHERE id NOT IN (SELECT id FROM logs)")
     con.commit()
 
     out_path = os.path.join(clean_dir, fn) if clean_dir else None
@@ -261,6 +263,10 @@ def import_csv(db_path, src_path, clean_dir=None, progress=None, display_name=No
         ofh.close()
 
     deduped = dedupe(con)
+    try:
+        index_source(con, fn)
+    except sqlite3.OperationalError:
+        pass  # 索引维护失败不该让整次导入回滚，启动时会自动补齐
     con.execute(
         "INSERT OR REPLACE INTO imports VALUES (?,?,?,?,?,?,?)",
         (fn, n, skipped, bad, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -276,11 +282,14 @@ def import_csv(db_path, src_path, clean_dir=None, progress=None, display_name=No
 def dedupe(con):
     """按 (ts,user,event,path,size,item_type) 去重，保留 id 最小的一条。"""
     before = con.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
-    con.execute("""
-      DELETE FROM logs WHERE id NOT IN (
-        SELECT MIN(id) FROM logs
-        GROUP BY ts,user,event,path,size,item_type
-      )""")
+    con.execute("DROP TABLE IF EXISTS temp._dup")
+    con.execute("""CREATE TEMP TABLE _dup AS
+        SELECT id FROM logs WHERE id NOT IN (
+          SELECT MIN(id) FROM logs
+          GROUP BY ts,user,event,path,size,item_type)""")
+    con.execute("DELETE FROM logs WHERE id IN (SELECT id FROM temp._dup)")
+    con.execute("DELETE FROM sidx WHERE id IN (SELECT id FROM temp._dup)")
+    con.execute("DROP TABLE temp._dup")
     con.commit()
     after = con.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
     return before - after
@@ -290,3 +299,162 @@ def ensure_indexes(con):
     for s in INDEXES:
         con.execute(s)
     con.commit()
+
+
+# ---------------- 检索索引 ----------------
+# 直接在 logs 上做 LIKE '%关键词%' 要全表扫 2GB，单次约 2 秒，而一次检索要扫 4 次。
+# 拆成两张窄表后，目录条件走 dirs（10MB，命中几万条也是毫秒级），
+# 文件名条件走 sidx 的覆盖索引，整体降到 0.5 秒以内。
+#
+#   dirs(did, path)          唯一目录，约 9 万条
+#   sidx(id, t, ev, usr, it, nm, did, sh, nm2, did2)
+#       nm  = 文件名（路径最后一段）
+#       did = 所在目录 id，目录名搜索通过 dirs 反查
+#       sh  = 共享目录名（登入类记录没有路径）
+#       nm2/did2 = 重命名后的新文件名与新目录（仅重命名类记录有）
+SEARCH_DDL = """
+CREATE TABLE IF NOT EXISTS dirs(
+  did INTEGER PRIMARY KEY, path TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS u_dirs_path ON dirs(path);
+
+CREATE TABLE IF NOT EXISTS sidx(
+  id INTEGER PRIMARY KEY, t INTEGER, ev TEXT, usr TEXT, it INTEGER,
+  nm TEXT, did INTEGER, sh TEXT, nm2 TEXT, did2 INTEGER);
+CREATE INDEX IF NOT EXISTS i_sidx_did  ON sidx(did);
+CREATE INDEX IF NOT EXISTS i_sidx_did2 ON sidx(did2) WHERE did2 IS NOT NULL;
+CREATE INDEX IF NOT EXISTS i_sidx_nm   ON sidx(nm);
+"""
+
+
+def ts_key(ts):
+    """'2026-08-31 11:03:14' → 20260831110314，便于整数比较与排序。"""
+    if not ts or len(ts) != 19:
+        return 0
+    return int(ts.replace("-", "").replace(" ", "").replace(":", ""))
+
+
+def ensure_search(con):
+    con.executescript(SEARCH_DDL)
+    con.commit()
+
+
+def _dir_cache(con):
+    return {r[0][:-1]: r[1] for r in con.execute("SELECT path, did FROM dirs")}
+
+
+def _split_path(path):
+    """返回 (文件名, 目录)；目录不含结尾斜杠。"""
+    if not path:
+        return "", ""
+    d, _, f = path.rpartition("/")
+    return f, d
+
+
+def _index_rows(con, rows, cache, batch=None):
+    """rows: (id, ts, event, user, item_type, path, new_path, share)"""
+    out = batch if batch is not None else []
+    for rid, ts, ev, usr, it, path, np, sh in rows:
+        nm, d = _split_path(path)
+        did = 0
+        if d:
+            did = cache.get(d)
+            if did is None:
+                con.execute("INSERT OR IGNORE INTO dirs(path) VALUES(?)", (d + "/",))
+                did = con.execute(
+                    "SELECT did FROM dirs WHERE path=?", (d + "/",)).fetchone()[0]
+                cache[d] = did
+        nm2 = did2 = None
+        if np:
+            nm2, d2 = _split_path(np)
+            if d2:
+                did2 = cache.get(d2)
+                if did2 is None:
+                    con.execute("INSERT OR IGNORE INTO dirs(path) VALUES(?)",
+                                (d2 + "/",))
+                    did2 = con.execute(
+                        "SELECT did FROM dirs WHERE path=?", (d2 + "/",)).fetchone()[0]
+                    cache[d2] = did2
+        out.append((rid, ts_key(ts), ev, usr, 1 if it == "文件夹" else 0,
+                    nm, did, sh or "", nm2, did2))
+    return out
+
+
+INSERT_SIDX = "INSERT OR REPLACE INTO sidx VALUES (?,?,?,?,?,?,?,?,?,?)"
+COLS_FOR_INDEX = "id,ts,event,user,item_type,path,new_path,share"
+
+
+def index_source(con, src):
+    """把某个来源文件的行补进检索索引（导入后调用）。"""
+    ensure_search(con)
+    cache = _dir_cache(con)
+    cur = con.execute("SELECT %s FROM logs WHERE src=?" % COLS_FOR_INDEX, (src,))
+    batch = []
+    while True:
+        rows = cur.fetchmany(50000)
+        if not rows:
+            break
+        batch = _index_rows(con, rows, cache, [])
+        con.executemany(INSERT_SIDX, batch)
+        con.commit()
+    return len(cache)
+
+
+def prune_search(con):
+    """删掉 logs 里已不存在的索引行（去重、按文件删除之后）。"""
+    con.execute("DELETE FROM sidx WHERE id NOT IN (SELECT id FROM logs)")
+    con.commit()
+
+
+def sync_search(con, progress=None):
+    """补齐遗漏的索引行。行数一致时直接返回，不做全表比对。"""
+    ensure_search(con)
+    a = con.execute("SELECT COUNT(*) FROM sidx").fetchone()[0]
+    b = con.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+    if a == b:
+        return 0
+    if a > b:
+        prune_search(con)
+        if a - b < 10000:
+            return 0
+    cache = _dir_cache(con)
+    cur = con.execute(
+        "SELECT %s FROM logs WHERE id NOT IN (SELECT id FROM sidx) ORDER BY id"
+        % COLS_FOR_INDEX)
+    n = 0
+    while True:
+        rows = cur.fetchmany(50000)
+        if not rows:
+            break
+        con.executemany(INSERT_SIDX, _index_rows(con, rows, cache, []))
+        con.commit()
+        n += len(rows)
+        if progress:
+            progress(n)
+    return n
+
+
+def rebuild_search(con, progress=None):
+    """整表重建 dirs + sidx。首次安装或结构变更时用。"""
+    ensure_search(con)
+    con.execute("DROP INDEX IF EXISTS i_sidx_did2")
+    con.execute("DELETE FROM sidx")
+    con.execute("DELETE FROM dirs")
+    con.commit()
+    con.execute("CREATE INDEX IF NOT EXISTS i_sidx_did2 ON sidx(did2)"
+                " WHERE did2 IS NOT NULL")
+    cache = {}
+    cur = con.execute("SELECT %s FROM logs ORDER BY id" % COLS_FOR_INDEX)
+    n = 0
+    while True:
+        rows = cur.fetchmany(50000)
+        if not rows:
+            break
+        batch = _index_rows(con, rows, cache, [])
+        con.executemany(INSERT_SIDX, batch)
+        con.commit()
+        n += len(rows)
+        if progress:
+            progress(n)
+    con.execute("ANALYZE sidx")
+    con.commit()
+    return n

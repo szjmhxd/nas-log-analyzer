@@ -1,6 +1,7 @@
 """NAS 日志分析台 · 本地服务
 启动: python server.py  然后浏览器打开 http://127.0.0.1:8777
 """
+import bisect
 import json
 import os
 import sqlite3
@@ -48,13 +49,26 @@ _OV_LOCK = threading.Lock()   # 避免预热和请求同时算两遍
 
 
 def db_stamp():
+    """数据库指纹，用来判断缓存是否还新鲜。
+
+    只看行数是不够的：删掉一个来源再导入同样多的行，行数一模一样，
+    但内容全换了，缓存会拿旧数据算谱系，把不相干的文件串到一起。
+    所以把库文件（含 WAL）的修改时间也带上。
+    """
     c = conn()
     try:
         n = c.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
         mx = c.execute("SELECT MAX(id) FROM logs").fetchone()[0] or 0
-        return "%d:%d" % (n, mx)
     finally:
         c.close()
+    tag = []
+    for f in (DB, DB + "-wal"):
+        try:
+            st = os.stat(f)
+            tag.append("%d.%d" % (st.st_mtime_ns, st.st_size))
+        except OSError:
+            pass
+    return "%d:%d:%s" % (n, mx, ",".join(tag))
 
 
 def clear_overview_cache():
@@ -157,48 +171,226 @@ def _compute_overview():
         c.close()
 
 
-def api_search(p):
-    where, args = [], []
-    kw = (p.get("q") or "").strip()
-    if kw:
-        # 支持多关键词，全部命中（AND）
-        for term in [t for t in kw.split() if t]:
-            where.append("(path LIKE ? OR new_path LIKE ? OR message LIKE ? "
-                         "OR share LIKE ?)")
-            args += ["%" + term + "%"] * 4
+_LIN = {"stamp": None, "parent": {}, "func": None}
+
+
+def _find(par, x):
+    root = x
+    while True:
+        p = par.get(root)
+        if p is None or p == root:
+            break
+        root = p
+    # 路径压缩
+    while x != root:
+        nxt = par.get(x, root)
+        par[x] = root
+        x = nxt
+    return root
+
+
+def _split(p):
+    d, _, f = (p or "").rpartition("/")
+    return d, f
+
+
+def lineage(c):
+    """把"同一份文件"的多次记录串成一个谱系。
+
+    两步：
+    1) 目录改名会连带改变所有子文件的路径（A 文件夹 → B 文件夹），
+       按时间把子路径回写成改名前的形式；
+    2) 文件自身的重命名 / 移动，沿改名链回溯到最早的名字。
+
+    为什么不用简单并查集：`新建文件夹` 这种名字会被反复使用，
+    直接合并会把几百个互不相干的文件串成一条。
+    这里给"根名字"附加代次（该名字下一次被改走的时间），
+    同一份文件始终落在同一个 (名字, 代次) 上。
+    """
+    stamp = db_stamp()
+    if _LIN["stamp"] == stamp:
+        return _LIN["func"]
+
+    by_new = {}          # 新目录 → [(时间, 旧目录)]，用于把子路径改写回改名前的目录
+    for ts, a, b in c.execute(
+            "SELECT ts, path, new_path FROM logs "
+            "WHERE item_type='文件夹' AND new_path IS NOT NULL AND new_path<>'' "
+            "AND event IN ('重命名','移动')"):
+        if a and b:
+            by_new.setdefault(b, []).append((ts, a))
+
+    def canon(path, ts):
+        """把目录改名之前的路径形式还原出来，最多回溯 5 层。"""
+        for _ in range(5):
+            d, f = _split(path)
+            hit = None
+            while d:
+                cands = by_new.get(d)
+                if cands:
+                    best = None
+                    for t0, old in cands:
+                        if t0 <= ts and (best is None or t0 > best[0]):
+                            best = (t0, old)
+                    if best:
+                        hit = best[1]
+                        break
+                d, _ = _split(d)
+            if not hit:
+                break
+            path = hit + "/" + f
+        return path
+
+    # 改名/移动边一律用"规范化后的路径"作键，否则同一条链会因目录改名断掉
+    into = {}
+    outof = {}
+    for ts, a, b in c.execute(
+            "SELECT ts, path, new_path FROM logs "
+            "WHERE new_path IS NOT NULL AND new_path<>'' "
+            "AND event IN ('重命名','移动')"):
+        if not a or not b:
+            continue
+        ca, cb = canon(a, ts), canon(b, ts)
+        into.setdefault(cb, []).append((ts, ca))
+        outof.setdefault(ca, []).append(ts)
+
+    for lst in outof.values():
+        lst.sort()
+
+    def lin(path, ts):
+        if not path:
+            return ""
+        ts = ts or ""
+        path = canon(path, ts)
+        for _ in range(6):
+            ins = into.get(path)
+            if not ins:
+                break
+            best = None
+            for t0, old in ins:
+                if t0 <= ts and (best is None or t0 > best[0]):
+                    best = (t0, old)
+            if not best or best[1] == path:
+                break
+            path, ts = best[1], best[0]
+        outs = outof.get(path)
+        if outs:
+            i = bisect.bisect_left(outs, ts)
+            gen = outs[i] if i < len(outs) else outs[-1]
+            return path + "\x00" + gen
+        return path
+
+    _LIN["stamp"] = stamp
+    _LIN["func"] = lin
+    return lin
+
+
+def _search_where(p):
+    """把筛选条件编译成 sidx 上的 WHERE 片段（时间用整数键，省一次转换）。"""
+    f, a = [], []
     if p.get("user"):
-        where.append("user = ?")
-        args.append(p["user"])
+        f.append("usr = ?")
+        a.append(p["user"])
     if p.get("event"):
-        where.append("event = ?")
-        args.append(p["event"])
-    if p.get("ip"):
-        where.append("ip = ?")
-        args.append(p["ip"])
+        f.append("ev = ?")
+        a.append(p["event"])
+    typ = (p.get("type") or "").strip()
+    if typ == "file":
+        f.append("it = 0")
+    elif typ == "folder":
+        f.append("it = 1")
     if p.get("from"):
-        where.append("date >= ?")
-        args.append(p["from"])
+        try:
+            f.append("t >= ?")
+            a.append(int(p["from"].replace("-", "")) * 1000000)
+        except ValueError:
+            pass
     if p.get("to"):
-        where.append("date <= ?")
-        args.append(p["to"])
-    w = ("WHERE " + " AND ".join(where)) if where else ""
-    limit = min(int(p.get("limit", 300)), 2000)
-    offset = int(p.get("offset", 0))
+        try:
+            f.append("t <= ?")
+            a.append(int(p["to"].replace("-", "")) * 1000000 + 235959)
+        except ValueError:
+            pass
+    return (" AND " + " AND ".join(f)) if f else "", a
+
+
+# 一次检索最多收这么多命中行再在内存里汇总；超过就标记为"至少这么多"
+CAP = 300000
+
+
+def api_search(p):
+    terms = [t for t in (p.get("q") or "").split() if t]
+    fw, fa = _search_where(p)
     c = conn()
     try:
-        total = c.execute("SELECT COUNT(*) FROM logs " + w, args).fetchone()[0]
-        rows = [dict(r) for r in c.execute(
-            "SELECT id,ts,date,user,ip,event,item_type,size,path,new_path,src_kind "
-            "FROM logs " + w + " ORDER BY ts DESC LIMIT ? OFFSET ?",
-            args + [limit, offset])]
-        agg = [dict(r) for r in c.execute(
-            "SELECT event, COUNT(*) n FROM logs " + w +
-            " GROUP BY event ORDER BY n DESC", args)]
-        who = [dict(r) for r in c.execute(
-            "SELECT user, COUNT(*) n FROM logs " + w +
-            " GROUP BY user ORDER BY n DESC LIMIT 8", args)]
-        return {"total": total, "rows": rows, "events": agg, "users": who,
-                "limit": limit, "offset": offset}
+        # 没有关键词时只有筛选条件，直接走 sidx 顺序扫描
+        hit = None
+        for term in terms:
+            kw = "%" + term + "%"
+            # sh / nm2 只在一小部分行上有值，用 <>'' 先短路，省掉 200 万次无用匹配
+            cur = c.execute(
+                "SELECT id,t,ev,usr,it FROM sidx "
+                "WHERE nm LIKE ? OR usr LIKE ? "
+                "   OR (sh<>'' AND sh LIKE ?) "
+                "   OR (nm2 IS NOT NULL AND nm2 LIKE ?) "
+                + fw + " LIMIT %d" % CAP, [kw, kw, kw, kw] + fa)
+            got = {r[0]: r for r in cur}
+            # 目录名命中：用 dirs 反查（9 万行，毫秒级），比在 200 万行路径里扫快几十倍
+            cur = c.execute(
+                "SELECT id,t,ev,usr,it FROM sidx "
+                "WHERE did IN (SELECT did FROM dirs WHERE path LIKE ?) "
+                "   OR did2 IN (SELECT did FROM dirs WHERE path LIKE ?) "
+                + fw + " LIMIT %d" % CAP, [kw, kw] + fa)
+            for r in cur:
+                got.setdefault(r[0], r)
+            hit = got if hit is None else {k: v for k, v in hit.items() if k in got}
+            if not hit:
+                break
+
+        if hit is None:
+            cur = c.execute(
+                "SELECT id,t,ev,usr,it FROM sidx WHERE 1=1 " + fw +
+                " ORDER BY t DESC LIMIT %d" % CAP, fa)
+            hit = {r[0]: r for r in cur}
+
+        total = len(hit)
+        truncated = total >= CAP
+        events = {}
+        users = {}
+        for r in hit.values():
+            events[r[2]] = events.get(r[2], 0) + 1
+            if r[3]:
+                users[r[3]] = users.get(r[3], 0) + 1
+
+        limit = min(int(p.get("limit", 300)), 5000)
+        offset = int(p.get("offset", 0))
+        ordered = sorted(hit.values(), key=lambda r: -r[1])
+        page = ordered[offset:offset + limit]
+
+        rows = []
+        if page:
+            ids = [r[0] for r in page]
+            ph = ",".join("?" * len(ids))
+            det = {r["id"]: dict(r) for r in c.execute(
+                "SELECT id,ts,date,user,ip,event,item_type,size,path,new_path,src_kind "
+                "FROM logs WHERE id IN (%s)" % ph, ids)}
+            for r in page:
+                d = det.get(r[0])
+                if not d:
+                    continue
+                rows.append(d)
+
+        # 谱系：把 重命名A→B 之后对 B 的操作并回 A，避免同一个文件被拆成两条
+        lin = lineage(c)
+        for d in rows:
+            d["lin"] = lin(d.get("new_path") or d.get("path") or "",
+                           d.get("ts") or "")
+
+        ev = sorted(({"event": k, "n": v} for k, v in events.items()),
+                    key=lambda x: -x["n"])
+        who = sorted(({"user": k, "n": v} for k, v in users.items()),
+                     key=lambda x: -x["n"])[:8]
+        return {"total": total, "truncated": truncated, "rows": rows,
+                "events": ev, "users": who, "limit": limit, "offset": offset}
     finally:
         c.close()
 
@@ -241,6 +433,7 @@ def api_delete(src):
             c.execute("DELETE FROM logs WHERE src = ?", (src,))
             deleted = c.total_changes
             c.execute("DELETE FROM imports WHERE src = ?", (src,))
+            c.execute("DELETE FROM sidx WHERE id NOT IN (SELECT id FROM logs)")
             c.commit()
             left = c.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
         finally:
@@ -280,6 +473,12 @@ def api_import(name, body):
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
         ".png": "image/png", ".ico": "image/x-icon"}
+
+
+class Server(ThreadingHTTPServer):
+    # Windows 下 SO_REUSEADDR 会让两个进程抢同一个端口而不报错，
+    # 结果新服务绑上了、请求却被老进程接走。这里关掉它，冲突就直接抛错换端口。
+    allow_reuse_address = False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -399,19 +598,34 @@ def main():
     if not os.path.exists(DB):
         print("未找到 logs.db，请先运行 build_db.py")
     P.ensure_indexes(P.connect(DB))
+    try:
+        P.sync_search(P.connect(DB))
+    except sqlite3.OperationalError as e:
+        print("检索索引自检失败：%s" % e)
     if backfill_imports():
         clear_overview_cache()   # 元数据变了，缓存作废
     warm_overview()              # 后台先把概览算好，前端打开即出图
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    threading.Thread(target=lambda: lineage(conn()), daemon=True).start()
+    # 先试默认端口；被占用（或落在 Windows 保留端口段里）就让系统分配一个
+    try:
+        srv, port = Server(("127.0.0.1", PORT), Handler), PORT
+    except OSError:
+        try:
+            srv = Server(("127.0.0.1", 0), Handler)
+            port = srv.server_address[1]
+            print("[提示] %d 端口不可用，已改用 %d" % (PORT, port))
+        except OSError as e:
+            print("[ERROR] 无法监听本地端口：%s" % e)
+            return
     print("=" * 46)
     print("  NAS 日志分析台已启动")
-    print("  浏览器打开:  http://127.0.0.1:%d" % PORT)
+    print("  浏览器打开:  http://127.0.0.1:%d" % port)
     print("  数据库:      %s" % DB)
     print("  按 Ctrl+C 停止")
-    print("=" * 46)
+    print("=" * 46, flush=True)
     if os.environ.get("NO_BROWSER") != "1":
         threading.Timer(1.2, lambda: webbrowser.open(
-            "http://127.0.0.1:%d" % PORT)).start()
+            "http://127.0.0.1:%d" % port)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -203,11 +203,21 @@ svg.line{display:block;width:100%}
 .fitem:hover{background:#FCFCFD}
 .fh{display:flex;align-items:center;gap:7px;min-width:0}
 .fh .ico{flex:0 0 13px;width:13px;height:13px;stroke:#9AA1AC;margin-top:-1px}
-.fh b{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fh b{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .fh .fmeta{margin-left:auto;flex:0 0 auto;font-size:10.5px;color:var(--ink3);
   font-variant-numeric:tabular-nums;padding-left:12px}
-.fdir{font-family:var(--mono);font-size:10.5px;color:#AAB0BA;margin:3px 0 6px 20px;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fpath{font-family:var(--mono);font-size:10.5px;color:#8C939E;margin:2px 0 6px 20px;
+  word-break:break-all;line-height:1.55;cursor:copy}
+.fpath:hover{color:var(--accent);text-decoration:underline dotted}
+.fpath.copied{color:#12805C;text-decoration:none}
+.fchain{margin:0 0 6px 20px;font-size:10.5px;color:var(--ink3);line-height:1.6}
+.fchain .alias{font-family:var(--mono);color:var(--ink2);background:#F6F7F9;
+  border-radius:3px;padding:0 4px}
+.fchain .ar{color:#C3C8D0;margin:0 2px}
+.ftag{flex:0 0 auto;font-size:9.5px;color:#8A6320;background:#FBF0D5;
+  border-radius:3px;padding:1px 5px;line-height:1.5}
+.fbar{height:2px;background:#F1F2F5;border-radius:2px;margin:5px 0 3px 20px;overflow:hidden}
+.fbar>i{display:block;height:100%;background:#CBD9F7;border-radius:2px}
 .fevs{margin-left:20px;border-left:1px solid var(--line);padding-left:11px}
 .fev{display:flex;align-items:baseline;gap:8px;padding:2.5px 0;font-size:11px;min-width:0}
 .fev .tm{flex:0 0 84px;color:var(--ink3);font-variant-numeric:tabular-nums;font-size:10.5px}
@@ -582,20 +592,27 @@ function drawHours(hours){
 }
 
 /* ============ 检索 ============ */
-let HQ={q:'',from:'',to:'',user:'',event:'',mode:'table'};
+let HQ={q:'',from:'',to:'',user:'',event:'',type:'',mode:'table'};
+let LAST=null;                       // 上一次检索结果，切视图时直接复用，不重新请求
 async function viewSearch(pre){
   $('#ttl').textContent='记录检索';
   Object.assign(HQ, pre||{});
-  $('#sub').textContent='搜路径 / 文件名 / 关键词，空格分隔多个条件';
+  if(!HQ.type) HQ.type='';
+  $('#sub').textContent='文件名 / 目录名 / 用户，空格分隔多个条件';
   $('#acts').innerHTML=`<button class="btn" id="exp">导出结果</button>`;
   const evs=OV?OV.events.map(e=>e.event):[];
   $('#view').innerHTML=`
   <div class="sbar">
-    <input type="text" id="q" placeholder="搜关键词，多个条件用空格分隔" value="${esc(HQ.q)}">
+    <input type="text" id="q" placeholder="搜文件名、目录名或用户，多个条件用空格分隔" value="${esc(HQ.q)}">
     <input type="date" id="from" value="${HQ.from}" title="起始日期">
     <input type="date" id="to" value="${HQ.to}" title="结束日期">
     <select id="fu"><option value="">全部用户</option></select>
     <select id="fe"><option value="">全部操作</option>${evs.map(e=>`<option ${e===HQ.event?'selected':''}>${esc(e)}</option>`).join('')}</select>
+    <select id="ft">
+      <option value="">文件+文件夹</option>
+      <option value="file" ${HQ.type==='file'?'selected':''}>仅文件</option>
+      <option value="folder" ${HQ.type==='folder'?'selected':''}>仅文件夹</option>
+    </select>
     <button class="btn primary" id="go">搜索</button>
   </div>
   <div class="chips" id="chips"></div>
@@ -605,47 +622,63 @@ async function viewSearch(pre){
       <button data-m="table" class="${HQ.mode==='table'?'on':''}">表格</button>
       <button data-m="time" class="${HQ.mode==='time'?'on':''}">按日期</button>
       <button data-m="file" class="${HQ.mode==='file'?'on':''}">按文件</button>
+      <button data-m="folder" class="${HQ.mode==='folder'?'on':''}">按文件夹</button>
     </div>
   </div><div id="res"><div class="empty">输入关键词后回车</div></div></div>`;
   $('#view').classList.add('fill');
 
   if(OV) $('#fu').innerHTML='<option value="">全部用户</option>'+OV.users.map(u=>`<option ${u.user===HQ.user?'selected':''}>${esc(u.user)}</option>`).join('');
-  const run=()=>{
+  const read=()=>{
     HQ.q=$('#q').value; HQ.from=$('#from').value; HQ.to=$('#to').value;
-    HQ.user=$('#fu').value; HQ.event=$('#fe').value; doSearch();
+    HQ.user=$('#fu').value; HQ.event=$('#fe').value; HQ.type=$('#ft').value;
   };
+  const run=()=>{ read(); doSearch(); };
   $('#go').onclick=run;
   $('#q').onkeydown=e=>{if(e.key==='Enter')run()};
-  ['#from','#to','#fu','#fe'].forEach(s=>$(s).onchange=run);
+  ['#from','#to','#fu','#fe','#ft'].forEach(s=>$(s).onchange=run);
   $('#vsw').onclick=e=>{
     const b=e.target.closest('button'); if(!b) return;
     HQ.mode=b.dataset.m;
     $('#vsw').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
-    doSearch();
+    paint();                       // 只重画，不再查库
   };
   $('#exp').onclick=()=>{
-    const p=new URLSearchParams({q:HQ.q,from:HQ.from,to:HQ.to,user:HQ.user,event:HQ.event});
+    read();
+    const p=new URLSearchParams({q:HQ.q,from:HQ.from,to:HQ.to,user:HQ.user,event:HQ.event,type:HQ.type});
     location.href='/api/export?'+p;
   };
-  if(HQ.q||HQ.user||HQ.event||HQ.from) doSearch();
+  if(LAST && LAST.q===JSON.stringify({q:HQ.q,u:HQ.user,e:HQ.event,f:HQ.from,t:HQ.to,ty:HQ.type})) paint();
+  else if(HQ.q||HQ.user||HQ.event||HQ.from||HQ.type) doSearch();
 }
-let SEARCH_T=0;
-async function doSearch(){
-  const p=new URLSearchParams({q:HQ.q,from:HQ.from,to:HQ.to,user:HQ.user,event:HQ.event,limit:400});
-  const box=$('#res'); box.innerHTML=loading('正在检索…','在全部记录中匹配关键词');
-  let d;
-  try{ d=await api('/api/search?'+p); }catch(e){ box.innerHTML=`<div class="empty">出错：${esc(e.message)}</div>`; return; }
+function paint(){
+  const d=LAST; if(!d) return;
   const c=$('#chips');
-  const MODEHINT={time:'按日期分组', file:'按文件分组'}[HQ.mode]||'';
-  c.innerHTML=`<span class="chip">命中 <b>${fmt(d.total)}</b> 条${d.total>d.rows.length?`（显示前 ${d.rows.length} 条）`:''}</span>`
+  const MODEHINT={time:'按日期分组', file:'按文件（同一文件的历史已合并）', folder:'按文件夹汇总'}[HQ.mode]||'';
+  c.innerHTML=`<span class="chip">命中 <b>${d.truncated?'≥'+fmt(d.total):fmt(d.total)}</b> 条${d.total>d.rows.length?`（取最近 ${d.rows.length} 条）`:''}</span>`
     + (d.users||[]).slice(0,4).map(u=>`<span class="chip gray">${esc(u.user)} <b>${fmt(u.n)}</b></span>`).join('')
-    + (MODEHINT?`<span class="chip gray">${MODEHINT}</span>`:'');
+    + (MODEHINT?`<span class="chip gray">${MODEHINT}</span>`:'')
+    + (d.ms!=null?`<span class="chip gray">${d.ms<1000?Math.round(d.ms)+' ms':(d.ms/1000).toFixed(2)+' s'}</span>`:'');
   $('#rtitle').textContent=`结果 ${fmt(d.total)} 条`;
+  const box=$('#res');
   if(!d.rows.length){ box.innerHTML='<div class="empty">没有匹配记录</div>'; return; }
   box.innerHTML = HQ.mode==='time' ? renderTimeline(d.rows)
                : HQ.mode==='file' ? renderFileTimeline(d.rows)
+               : HQ.mode==='folder' ? renderFolderView(d.rows)
                : renderTable(d.rows);
   box.scrollTop = 0;
+}
+async function doSearch(){
+  const p=new URLSearchParams({q:HQ.q,from:HQ.from,to:HQ.to,user:HQ.user,
+                              event:HQ.event,type:HQ.type,limit:400});
+  const box=$('#res'); box.innerHTML=loading('正在检索…','文件名与目录名同时匹配');
+  const t0=performance.now();
+  let d;
+  try{ d=await api('/api/search?'+p); }
+  catch(e){ box.innerHTML=`<div class="empty">出错：${esc(e.message)}</div>`; return; }
+  d.ms=performance.now()-t0;
+  d.q=JSON.stringify({q:HQ.q,u:HQ.user,e:HQ.event,f:HQ.from,t:HQ.to,ty:HQ.type});
+  LAST=d;
+  paint();
 }
 function hl(txt){
   const kw=(HQ.q||'').trim().split(/\s+/).filter(Boolean);
@@ -670,13 +703,25 @@ function splitPath(p){
   if(i<0) return {dir:'',fn:p};
   return {dir:p.slice(0,i+1),fn:p.slice(i+1)};
 }
+function curPath(r){ return r.new_path || r.path || ''; }
+function copyPath(el,txt){
+  el.title='点击复制完整路径';
+  el.onclick=e=>{
+    e.stopPropagation();
+    navigator.clipboard?.writeText(txt).then(()=>{
+      const old=el.textContent; el.textContent='已复制';
+      el.classList.add('copied');
+      setTimeout(()=>{ el.textContent=old; el.classList.remove('copied'); },900);
+    });
+  };
+}
 function renderTable(rows){
   return `<div class="scrollmini"><table class="tbl">
   <thead><tr><th style="width:132px">时间</th><th style="width:74px">用户</th><th style="width:72px">操作</th>
   <th style="width:112px">IP</th><th style="width:64px">大小</th><th>文件 / 路径</th></tr></thead><tbody>
   ${rows.map(r=>{
     const s=splitPath(r.path);
-    const np = r.new_path? `<div style="font-size:10.5px;color:var(--ink3);margin-top:2px">→ ${hl(splitPath(r.new_path).fn||r.new_path)}</div>`:'';
+    const np = r.new_path? `<div style="font-size:10.5px;color:var(--ink3);margin-top:2px">→ ${hl(r.new_path)}</div>`:'';
     return `<tr><td class="ts">${r.ts||''}</td><td class="u">${esc(r.user||'—')}</td>
     <td>${tag(r.event)}</td><td class="ts">${esc(r.ip||'—')}</td><td class="ts">${bytes(r.size)}</td>
     <td class="path"><span class="dir">${hl(s.dir)}</span><span class="fn">${hl(s.fn)}</span>${np}</td></tr>`;
@@ -704,34 +749,87 @@ function renderTimeline(rows){
 }
 
 function fmtTime(ts){ return (ts||'').slice(5,16).replace('T',' '); }
+function nameOf(p){ return splitPath(p).fn || p || '（无路径）'; }
+
+/* 同一份文件的历史：按谱系根（服务端的 lin）分组，改名前后算一条 */
 function renderFileTimeline(rows){
   const g={};
-  rows.forEach(r=>{ const k=r.path||'(无路径)'; (g[k] ||= []).push(r); });
+  rows.forEach(r=>{ const k=r.lin||curPath(r)||'(无路径)'; (g[k] ||= []).push(r); });
   const items=Object.keys(g).map(k=>{
     const list=g[k].slice().sort((a,b)=>((a.ts||'')<(b.ts||'')?-1:1));
     const us=new Set(list.map(r=>r.user).filter(Boolean));
-    return {key:k, list, first:list[0].ts||'', last:list[list.length-1].ts||'', users:us.size};
-  }).sort((a,b)=> a.last<b.last ? 1 : a.last>b.last ? -1 : 0);
+    const names=[];
+    list.forEach(r=>{
+      const n=nameOf(r.path);
+      if(n && names[names.length-1]!==n) names.push(n);
+    });
+    const last=r=>r;
+    const curPathNow=curPath(list[list.length-1]);
+    // names 里最后一个就是现在的名字，别混进"曾用名"里
+    if(names.length && names[names.length-1]===nameOf(curPathNow)) names.pop();
+    const isFolder=list.some(r=>r.item_type==='文件夹');
+    return {key:k, list, first:list[0].ts||'', lastT:list[list.length-1].ts||'',
+            users:us.size, names, cur:curPathNow, isFolder};
+  }).sort((a,b)=> a.lastT<b.lastT ? 1 : a.lastT>b.lastT ? -1 : 0);
   if(!items.length) return '<div class="empty">没有匹配记录</div>';
   return `<div class="flist">${items.map(it=>{
-    const s=splitPath(it.key);
-    const one = (it.first||'').slice(0,16)===(it.last||'').slice(0,16);
-    const span = one ? fmtTime(it.first) : `${fmtTime(it.first)} → ${fmtTime(it.last)}`;
+    const s=splitPath(it.cur);
+    const one=(it.first||'').slice(0,16)===(it.lastT||'').slice(0,16);
+    const span=one?fmtTime(it.first):`${fmtTime(it.first)} → ${fmtTime(it.lastT)}`;
+    const renamed=it.names.length>0;
     return `<div class="fitem">
       <div class="fh">
-        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V9z"/><path d="M13 3v6h6"/></svg>
-        <b title="${esc(it.key)}">${hl(s.fn||it.key)}</b>
+        ${it.isFolder
+          ? `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>`
+          : `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V9z"/><path d="M13 3v6h6"/></svg>`}
+        <b title="${esc(it.cur)}">${hl(s.fn||it.cur)}</b>
+        ${it.isFolder?'<span class="ftag">文件夹</span>':''}
         <span class="fmeta">${it.list.length} 次 · ${it.users} 人 · ${span}</span>
       </div>
-      ${s.dir?`<div class="fdir" title="${esc(s.dir)}">${esc(shortDir(s.dir))}</div>`:''}
+      <div class="fpath" title="${esc(it.cur)}" data-p="${esc(it.cur)}">${esc(it.cur)}</div>
+      ${renamed?`<div class="fchain">曾用名 ${it.names.map((n,i)=>
+        i? `<span class="ar">→</span> <span class="alias">${esc(n)}</span>` : `<span class="alias">${esc(n)}</span>`
+      ).join(' ')}</div>`:''}
       <div class="fevs">${it.list.map(r=>{
         const np = r.new_path
-          ? ` <span class="ar">→</span> <span class="fn2" title="${esc(r.new_path)}">${hl(splitPath(r.new_path).fn||r.new_path)}</span>`
+          ? ` <span class="ar">→</span> <span class="fn2" title="${esc(r.new_path)}">${hl(nameOf(r.new_path))}</span>`
           : '';
         return `<div class="fev"><span class="tm">${fmtTime(r.ts)}</span>${tag(r.event)}
           <span class="sz">${bytes(r.size)}</span>${np}
           <span class="wh">${esc(r.user||'')}</span></div>`;
       }).join('')}</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+/* 按文件夹：把命中记录按所在目录汇总，用来回答"这个目录里都有谁动过" */
+function renderFolderView(rows){
+  const g={};
+  rows.forEach(r=>{
+    const p=r.path||'';
+    const d=p.includes('/')?p.slice(0,p.lastIndexOf('/')+1):'(未知目录)';
+    (g[d] ||= []).push(r);
+  });
+  const items=Object.keys(g).map(k=>{
+    const list=g[k];
+    const files=new Set(list.map(r=>r.path).filter(Boolean));
+    const us=new Set(list.map(r=>r.user).filter(Boolean));
+    const ts=list.map(r=>r.ts||'').sort();
+    return {dir:k, n:list.length, files:files.size, users:us.size,
+            first:ts[0]||'', last:ts[ts.length-1]||'', list};
+  }).sort((a,b)=> b.n-a.n || (a.last<b.last?1:-1));
+  if(!items.length) return '<div class="empty">没有匹配记录</div>';
+  const max=items[0].n||1;
+  return `<div class="flist">${items.map(it=>{
+    const s=splitPath(it.dir.replace(/\/$/,''));
+    return `<div class="fitem">
+      <div class="fh">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+        <b title="${esc(it.dir)}">${hl(s.fn||it.dir)}</b>
+        <span class="fmeta">${fmt(it.n)} 次 · ${fmt(it.files)} 个文件 · ${it.users} 人 · ${fmtTime(it.first)} → ${fmtTime(it.last)}</span>
+      </div>
+      <div class="fpath" title="${esc(it.dir)}" data-p="${esc(it.dir)}">${esc(it.dir)}</div>
+      <div class="fbar"><i style="width:${Math.max(2,it.n/max*100).toFixed(1)}%"></i></div>
     </div>`;
   }).join('')}</div>`;
 }
@@ -892,6 +990,16 @@ function bootView(){
   if(VIEWS[h]) go(h, Object.keys(pre).length?pre:undefined);
 }
 document.addEventListener('click',e=>{
+  const fp=e.target.closest('.fpath');
+  if(fp && fp.dataset.p){
+    const txt=fp.dataset.p;
+    (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject())
+      .then(()=>{ fp.classList.add('copied'); const o=fp.textContent;
+        fp.textContent='已复制完整路径';
+        setTimeout(()=>{ fp.textContent=o; fp.classList.remove('copied'); }, 900); })
+      .catch(()=>{});
+    return;
+  }
   const b=e.target.closest('#scalesw button'); if(!b) return;
   LOGSCALE = b.dataset.s==='log';
   if(OV) drawLine(OV.daily);

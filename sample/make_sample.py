@@ -1,7 +1,7 @@
 """生成完全虚构的示例数据，用于演示三种导出格式的识别与清洗。
 
 生成物（都是假的，人名 / 目录 / 文件名均为示意）：
-  general_2026-06.csv   9 列格式，2026-06-01 ~ 06-28
+  general_2026-06.csv   9 列格式，2026-06-01 ~ 06-30
   system_2026-07.csv    7 列格式，2026-07-01 ~ 07-20，消息里是 SMB / 认证原文
 
 刻意保留了两种真实导出里常见的脏数据：
@@ -43,7 +43,7 @@ def human_size(n):
 def gen_general():
     rows = []
     day = datetime(2026, 6, 1)
-    end = datetime(2026, 6, 28)
+    end = datetime(2026, 6, 30)
     while day <= end:
         weekend = day.weekday() >= 5
         n = random.randint(4, 14) if weekend else random.randint(28, 68)
@@ -76,9 +76,35 @@ def gen_general():
     return path, len(rows)
 
 
+STORY = [
+    # (时间, 用户, 事件英文, 路径, 新路径, 大小, 类型)
+    # 一段完整的文件履历：创建 → 写入 → 改名 → 所在目录改名 → 读取 → 删除。
+    # 六条记录的路径各不相同，但搜 "nda" 就能一次命中，用来演示
+    # "按文件"视图把它们归成同一条。
+    ("2026/07/02 10:00:12", "bob", "create",
+     "/team/beta/nda-vault/nda.docx", None, "412.30 KB", "File"),
+    ("2026/07/02 10:06:41", "bob", "write",
+     "/team/beta/nda-vault/nda.docx", None, "412.30 KB", "File"),
+    ("2026/07/03 09:30:05", "bob", "rename",
+     "/team/beta/nda-vault/nda.docx",
+     "/team/beta/nda-vault/nda-2026.docx", "412.30 KB", "File"),
+    ("2026/07/03 09:32:18", "carol", "rename",
+     "/team/beta/nda-vault", "/team/beta/signed", "0.00 KB", "Folder"),
+    ("2026/07/08 11:00:33", "dave", "read",
+     "/team/beta/signed/nda-2026.docx", None, "412.30 KB", "File"),
+    ("2026/07/15 16:20:07", "bob", "delete",
+     "/team/beta/signed/nda-2026.docx", None, "412.30 KB", "File"),
+]
+
+
 def gen_system():
     """7 列系统日志：文件操作与登录信息都压在「消息」一列里。"""
     rows = []
+    for ts, user, smb, path, newpath, size, kind in STORY:
+        p = path if not newpath else "%s -> %s" % (path, newpath)
+        rows.append([ts, "信息", "NAS", "user", "SMB",
+                     "Event: %s, Path: %s, File/Folder: %s, Size: %s, "
+                     "User: %s, IP: %s" % (smb, p, kind, size, user, IPS[user])])
     day = datetime(2026, 7, 1)
     end = datetime(2026, 7, 20)
     while day <= end:
